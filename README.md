@@ -4,7 +4,7 @@ Shows live user statistics from OpenStreetMap.
 
 ## What it looks like
 
-!(chart.png)
+![example chart](chart.png)
 
 Or try it out on the [live server](http://www.gryph.de:8080) (note, uses port 8080 so be aware of firewall issues). 
 
