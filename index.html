@@ -1,0 +1,267 @@
+<html>
+<head>
+<script src="js.js"></script>
+<link href="css.css" rel="stylesheet" type="text/css">
+<script>
+
+// set to 100 for smooth movement, or larger to sace resources
+var refresh_timeout = 100;
+
+// "/" is ok if serving this from the Perl script, else put URL
+// of data server.
+var base_url = "/";
+var charts = Array();
+
+// add one chart when loaded
+$(document).ready(function() {
+    setTimeout(refresh, refresh_timeout);
+    add(null);
+});
+
+// computing the bar size needs the previous state and the current state;
+// in order not to have to wait for one full interval when we start, we 
+// request the previous state explicitly 
+function initquery(which)
+{
+    which.previous = undefined;
+    which.current = undefined;
+    $.get(base_url + "prevstats", { minutes : which.minutes }, function(data) { initstats(which, data) });
+}
+
+// this is the normal regular update
+function update(which)
+{
+    $.get(base_url + "stats", { minutes : which.minutes }, function(data) { stats(which, data) });
+}
+
+// return function from the initquery ajax call - record result and request next
+function initstats(which, data)
+{
+    which.current = data;
+    which.client_time = Date.now() - 60000 * which.minutes;
+    setTimeout(function() { update(which) }, 500);
+}
+
+// return fucntion from normal update - record and continue
+function stats(which, data)
+{
+    which.previous = which.current;
+    which.previous_client_time = which.client_time;
+    which.current = data;
+    which.client_time = Date.now();
+    $("#since").html(new Date(data.earliest * 1000).toUTCString());
+    setTimeout(function() { update(which) }, 60000);
+    if (!which.previous) return;
+    if (!which.previous.edits) return;
+    for (var uid in which.current.edits)
+    {
+        if (!which.previous.edits[uid]) 
+        {
+            which.previous.edits[uid] = {};
+            which.previous.edits[uid].edits=0
+            which.previous.edits[uid].username=which.current.edits[uid].username;
+        }
+    }
+}
+
+// refresh all charts
+function refresh()
+{
+    i = 0;
+    charts.forEach(function(c) 
+    {
+       if (c.previous && c.current)
+       {
+           // compute how far along the time interval between previous
+           // and current we are ("where" should end up between 0 and 1)
+           where = (Date.now() - c.client_time) / (c.client_time - c.previous_client_time);
+           if (where > 1) where = 1;
+           // do the flot heavy lifting
+           build_chart("#stat" + i, where, c.previous.edits, c.current.edits);
+       }
+       i++;
+    });
+    setTimeout(refresh, refresh_timeout);
+}
+
+// called when dropdown is used to change number of minutes; this 
+// requires a full temporal recalibration
+function initialize(domobj)
+{
+    context = domobj.closest("div.graph");
+    numid = context.id.substr(1);
+    which = charts[numid];
+    which.minutes = $("select.minutes", context).val();
+    initquery(which);
+}
+
+// called when any of the other dropdowns are used; no recalibration
+// needed
+function configure(domobj)
+{
+    context = domobj.closest("div.graph");
+    numid = context.id.substr(1);
+    which = charts[numid];
+    which.max = $("select.max", context).val();
+    which.top = Math.floor($("select.top", context).val());
+    chart = $("div.stat", context).get(0);
+    chart.style.width = $("select.width", context).val();
+    chart.style.height = $("select.height", context).val();
+}
+
+// adds a new chart
+function add(domobj)
+{
+    template = $("#template");
+    newgraph = $("div.graph", template);
+    newgraph = newgraph.clone();
+    newgraph.insertBefore($("#end"));
+    newgraph.attr("id", "d" + charts.length);
+    $("div.stat", newgraph).attr("id", "stat" + charts.length);
+    newchart = { minutes : 1, max: 500, top: 15 };
+    charts.push(newchart);
+    initquery(newchart);
+}
+
+// removes chart
+function closechart(domobj)
+{
+    context = domobj.closest("div.graph");
+    numid = context.id.substr(1);
+    context.remove();
+    charts.splice(numid);
+}
+
+// builds chart with flot
+// this is a little complicated, actually builds separate time series for each
+// user so we get different colours
+function build_chart(tblid, where, dold, dnew)
+{
+    uids = Array();
+    tblval = {};
+    plotval = [];
+    dummy  = [];
+    plotticks = [];
+    for (var uid in dold)
+    {
+        ne = dnew[uid] ? dnew[uid].edits : 0;
+        // compute a little up/down/circle symbol depending on trend
+        sym =  (ne > dold[uid].edits) ? "&nearr;" : (ne < dold[uid].edits) ? "&searr;" : "o&nbsp;";
+        uids.unshift([ dold[uid].username, sym ]);
+        tblval[dold[uid].username] = dold[uid].edits + (ne - dold[uid].edits) * where;
+    }
+    uids.sort(function(b, a) { return (tblval[a[0]] < tblval[b[0]]) ? -1 : (tblval[a[0]] >tblval[b[0]]) ? 1 : 0 });
+    ar = [];
+    for (var i = 0; i < uids.length && i < charts[0].top; i++)
+    {
+        uid = uids[i][0];
+        var hash = 0;
+        for (var j = 0; j < uid.length; j++) {
+            char = uid.charCodeAt(j);
+            hash = ((hash<<5)-hash)+char;
+            hash = hash & hash; 
+        }
+        color = "#" + Math.abs(hash).toString(16).substr(0, 6);
+        pv = [];
+        pv.push([tblval[uid], charts[0].top-i]);
+        ar.push({ "data" : pv, "color" : color });
+        plotticks.push([charts[0].top-i, uid + " " + uids[i][1]]);
+    };
+    $.plot(tblid, ar, {
+        series: {
+           bars: {
+               show: true,
+               horizontal: true,
+               align: "center", 
+               lineWidth: 0,
+               barWidth: 0.6
+           }
+        },
+        xaxis: {
+           min: 0, 
+           max: charts[0].max,
+        },
+        yaxis: {
+           min: 0.5,
+           max: charts[0].top + 0.5,
+           ticks: charts[0].top,
+           axisLabel: "label",
+           axisLabelUseCanvas: true,
+           labelWidth: 150,
+           // tickFormatter to make hyperlinks from user names
+           tickFormatter: function (val, axis) {
+              txt = uids[charts[0].top-val] ? uids[charts[0].top-val][0] : "";
+              sym = uids[charts[0].top-val] ? uids[charts[0].top-val][1] : "";
+              return '<a style="white-space:nowrap;" href="http://www.openstreetmap.org/user/' + txt + '/history">' + txt + '</a>&nbsp;<span style="width: 1em">' + sym + '</span>';
+           }
+        }
+    });
+    // make links clickable
+    $('.flot-y-axis').css('zIndex',100);
+}
+</script>
+</head> 
+<body>
+<h1>"Live" OSM user statistics</h1>
+<p>
+What you see here is the (average) number of edits per minute made by the most 
+active users in the time span selected. It's not really live, it's delayed by 
+a minute and smoothened a bit so it looks nicer.
+</p>
+<p>
+The page can show any number of graphs; when you first open it, just click the
+"Add" button below to add your first one.
+</p>
+<p>
+Server has data since: <span id="since"><em>(not loaded)</em></span>
+</p>
+<div id="template" style="display:none">
+<div id="d0" class="graph">
+<select class="minutes" onchange="initialize(this);">
+<option value="1">last minute</option>
+<option value="2" selected>last two minutes</option>
+<option value="5">last five minutes</option>
+<option value="10">last ten minutes</option>
+<option value="60">last hour</option>
+</select>
+<select class="max" onchange="configure(this);">
+<option value="100">100 edits</option>
+<option value="200">200 edits</option>
+<option value="300">300 edits</option>
+<option value="400">400 edits</option>
+<option value="500" selected>500 edits</option>
+<option value="1000">1000 edits</option>
+</select>
+<select class="top" onchange="configure(this);">
+<option value="5">top 5</option>
+<option value="10">top 10</option>
+<option value="15">top 15</option>
+<option value="20" selected>top 20</option>
+<option value="30">top 30</option>
+<option value="50">top 50</option>
+</select>
+<select class="width" onchange="configure(this);">
+<option value="400">400px</option>
+<option value="600">600px</option>
+<option value="800" selected>800px</option>
+<option value="1000">1000px</option>
+<option value="1500">1500px</option>
+</select>
+<select class="height" onchange="configure(this);">
+<option value="300">by 400px</option>
+<option value="400">by 500px</option>
+<option value="500" selected>by 500px</option>
+<option value="750">by 750px</option>
+<option value="1000">by 1000px</option>
+</select>
+<button onclick="closechart(this)">Close</button>
+<div class="stat" style="width: 800px; height: 500px;"> </div>
+</div>
+</div>
+<div id="end">
+<button onclick="add(this)">Add chart</a>
+</div>
+
+<a href="http://github.com/woodpeck/livestats">Fork me on GitHub</a>
+</body>
+</html>
